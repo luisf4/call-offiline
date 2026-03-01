@@ -1,9 +1,8 @@
 /**
- * Call na Vercel: usa API routes + Redis para sinalização.
- * Quando a conexão com a Vercel cai, as conexões P2P já estabelecidas continuam (áudio segue).
+ * Call com servidor de sinalização WebSocket (um processo só = estado consistente).
+ * Na Vercel a memória das API routes não é compartilhada, então conecta/desconecta e áudio
+ * só funcionam de forma estável usando o servidor local: npm run signaling
  */
-
-const getApi = () => (typeof window !== "undefined" ? "" : "http://localhost:3000");
 
 export function createPeerId(): string {
   return `peer-${Math.random().toString(36).slice(2, 11)}`;
@@ -23,67 +22,124 @@ function parseSignal(raw: string): SignalMessage {
   return JSON.parse(raw) as SignalMessage;
 }
 
-export async function joinRoom(roomId: string, peerId: string): Promise<string[]> {
-  const res = await fetch(`${getApi()}/api/room`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ roomId, peerId }),
-  });
-  if (!res.ok) throw new Error("Falha ao entrar na sala");
-  return res.json();
-}
+export type WsSignaling = {
+  joinRoom: (roomId: string, peerId: string) => Promise<string[]>;
+  leaveRoom: (roomId: string, peerId: string) => void;
+  sendSignal: (from: string, to: string, signal: unknown) => void;
+  onPeers: (cb: (peers: string[]) => void) => void;
+  onSignal: (cb: (from: string, signal: string) => void) => void;
+  onDisconnect: (cb: () => void) => void;
+  onReconnect: (cb: () => void) => void;
+  isConnected: () => boolean;
+  close: () => void;
+};
 
-export async function leaveRoom(roomId: string, peerId: string): Promise<void> {
-  try {
-    await fetch(`${getApi()}/api/room`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ roomId, peerId, action: "leave" }),
-    });
-  } catch (_) {}
-}
+export function createWsSignaling(wsUrl: string): WsSignaling {
+  let ws: WebSocket | null = null;
+  let peersCb: ((peers: string[]) => void) | null = null;
+  let signalCb: ((from: string, signal: string) => void) | null = null;
+  let disconnectCb: (() => void) | null = null;
+  let reconnectCb: (() => void) | null = null;
+  let joinResolve: ((peers: string[]) => void) | null = null;
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
-async function getPeersInRoom(roomId: string): Promise<string[] | null> {
-  try {
-    const res = await fetch(`${getApi()}/api/room?roomId=${encodeURIComponent(roomId)}`);
-    if (!res.ok) return null;
-    return res.json();
-  } catch {
-    return null;
+  function connect() {
+    if (ws?.readyState === WebSocket.OPEN) return;
+    try {
+      ws = new WebSocket(wsUrl);
+    } catch {
+      scheduleReconnect();
+      return;
+    }
+    ws.onopen = () => reconnectCb?.();
+    ws.onmessage = (event) => {
+      try {
+        const msg = JSON.parse(event.data as string);
+        if (msg.type === "peers") {
+          const list = Array.isArray(msg.peers) ? msg.peers : [];
+          if (joinResolve) {
+            joinResolve(list);
+            joinResolve = null;
+          }
+          peersCb?.(list);
+        } else if (msg.type === "signal" && msg.from != null && msg.signal != null) {
+          const sig = typeof msg.signal === "string" ? msg.signal : JSON.stringify(msg.signal);
+          signalCb?.(msg.from, sig);
+        }
+      } catch (_) {}
+    };
+    ws.onclose = () => {
+      ws = null;
+      disconnectCb?.();
+      scheduleReconnect();
+    };
+    ws.onerror = () => {};
   }
-}
 
-export async function sendSignal(
-  from: string,
-  to: string,
-  signal: unknown
-): Promise<void> {
-  try {
-    await fetch(`${getApi()}/api/signal`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ from, to, signal: JSON.stringify(signal) }),
-    });
-  } catch (_) {}
-}
-
-async function getSignals(peerId: string): Promise<Array<{ from: string; signal: string }>> {
-  try {
-    const res = await fetch(
-      `${getApi()}/api/signal?peerId=${encodeURIComponent(peerId)}`
-    );
-    if (!res.ok) return [];
-    return res.json();
-  } catch {
-    return [];
+  function scheduleReconnect() {
+    if (reconnectTimer) return;
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null;
+      connect();
+    }, 2000);
   }
+
+  return {
+    isConnected: () => ws?.readyState === WebSocket.OPEN,
+    joinRoom(roomId: string, peerId: string): Promise<string[]> {
+      connect();
+      return new Promise((resolve, reject) => {
+        const t = setTimeout(() => {
+          if (joinResolve) {
+            joinResolve = null;
+            reject(new Error("Servidor não respondeu. Rode: npm run signaling"));
+          }
+        }, 10000);
+        joinResolve = (peers) => {
+          clearTimeout(t);
+          joinResolve = null;
+          resolve(peers);
+        };
+        const send = () => {
+          if (ws?.readyState === WebSocket.OPEN)
+            ws.send(JSON.stringify({ type: "join", roomId, peerId }));
+        };
+        if (ws?.readyState === WebSocket.OPEN) send();
+        else ws?.addEventListener?.("open", send, { once: true });
+      });
+    },
+    leaveRoom(roomId: string, peerId: string) {
+      if (ws?.readyState === WebSocket.OPEN)
+        ws.send(JSON.stringify({ type: "leave", roomId, peerId }));
+    },
+    sendSignal(from: string, to: string, signal: unknown) {
+      if (ws?.readyState === WebSocket.OPEN)
+        ws.send(JSON.stringify({
+          type: "signal",
+          from,
+          to,
+          signal: typeof signal === "string" ? signal : JSON.stringify(signal),
+        }));
+    },
+    onPeers(cb: (peers: string[]) => void) { peersCb = cb; },
+    onSignal(cb: (from: string, signal: string) => void) { signalCb = cb; },
+    onDisconnect(cb: () => void) { disconnectCb = cb; },
+    onReconnect(cb: () => void) { reconnectCb = cb; },
+    close() {
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+      ws?.close();
+      ws = null;
+    },
+  };
 }
 
-export function createPeerConnection(
+function createPeerConnection(
   myId: string,
   otherId: string,
   isInitiator: boolean,
   localStream: MediaStream,
+  sendSignalFn: (to: string, signal: unknown) => void,
   onRemoteStream: (peerId: string, stream: MediaStream) => void,
   onClose: (peerId: string) => void
 ): PeerConnection {
@@ -107,18 +163,13 @@ export function createPeerConnection(
   };
   pc.oniceconnectionstatechange = () => {
     const state = pc.iceConnectionState;
-    if (state === "disconnected" || state === "failed" || state === "closed") {
-      onClose(otherId);
-    }
+    if (state === "disconnected" || state === "failed" || state === "closed") onClose(otherId);
   };
   pc.onconnectionstatechange = () => {
-    if (pc.connectionState === "failed" || pc.connectionState === "closed") {
-      onClose(otherId);
-    }
+    if (pc.connectionState === "failed" || pc.connectionState === "closed") onClose(otherId);
   };
   pc.onicecandidate = (e) => {
-    if (e.candidate)
-      sendSignal(myId, otherId, { type: "candidate", candidate: e.candidate.toJSON() });
+    if (e.candidate) sendSignalFn(otherId, { type: "candidate", candidate: e.candidate.toJSON() });
   };
 
   const addSignal = async (msg: SignalMessage) => {
@@ -128,7 +179,7 @@ export function createPeerConnection(
         await applyIceQueue();
         const answer = await pc.createAnswer();
         await pc.setLocalDescription(answer);
-        await sendSignal(myId, otherId, { type: "answer", sdp: answer.sdp! });
+        sendSignalFn(otherId, { type: "answer", sdp: answer.sdp! });
       } else if (msg.type === "answer") {
         await pc.setRemoteDescription(new RTCSessionDescription({ type: "answer", sdp: msg.sdp }));
         await applyIceQueue();
@@ -149,68 +200,58 @@ export function createPeerConnection(
     (async () => {
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
-      await sendSignal(myId, otherId, { type: "offer", sdp: offer.sdp! });
+      sendSignalFn(otherId, { type: "offer", sdp: offer.sdp! });
     })();
   }
 
   return { addSignal, close: () => pc.close() };
 }
 
-export async function connectToPeers(
+export function connectToPeersWithSignaling(
   myId: string,
   roomId: string,
   localStream: MediaStream,
+  signaling: WsSignaling,
   connections: Map<string, PeerConnection>,
   onRemoteStream: (peerId: string, stream: MediaStream) => void,
   onPeerLeft: (peerId: string) => void,
   onPeersChange: (peers: string[]) => void,
-  onSignalingOnline: (online: boolean) => void,
   stopRef: { stop: boolean }
-): Promise<void> {
+): () => void {
   const closeConnection = (peerId: string) => {
     connections.get(peerId)?.close();
     connections.delete(peerId);
     onPeerLeft(peerId);
   };
 
-  let hadSuccess = false;
-
-  while (!stopRef.stop) {
-    const peers = await getPeersInRoom(roomId);
-    if (peers !== null) {
-      hadSuccess = true;
-      onSignalingOnline(true);
-      onPeersChange(peers);
-
-      for (const peerId of peers) {
-        if (peerId === myId) continue;
-        if (connections.has(peerId)) continue;
-        const isInitiator = myId < peerId;
-        const conn = createPeerConnection(
-          myId,
-          peerId,
-          isInitiator,
-          localStream,
-          onRemoteStream,
-          closeConnection
-        );
-        connections.set(peerId, conn);
-      }
-
-      for (const peerId of connections.keys()) {
-        if (!peers.includes(peerId)) closeConnection(peerId);
-      }
-
-      const list = await getSignals(myId);
-      for (const { from, signal } of list) {
-        const msg = parseSignal(signal);
-        const conn = connections.get(from);
-        if (conn) conn.addSignal(msg);
-      }
-    } else {
-      if (hadSuccess) onSignalingOnline(false);
+  signaling.onPeers((peers) => {
+    if (stopRef.stop) return;
+    onPeersChange(peers);
+    for (const peerId of peers) {
+      if (peerId === myId) continue;
+      if (connections.has(peerId)) continue;
+      const isInitiator = myId < peerId;
+      const conn = createPeerConnection(
+        myId,
+        peerId,
+        isInitiator,
+        localStream,
+        (to, signal) => signaling.sendSignal(myId, to, signal),
+        onRemoteStream,
+        closeConnection
+      );
+      connections.set(peerId, conn);
     }
+    for (const peerId of connections.keys()) {
+      if (!peers.includes(peerId)) closeConnection(peerId);
+    }
+  });
 
-    await new Promise((r) => setTimeout(r, 800));
-  }
+  signaling.onSignal((from, signalStr) => {
+    const msg = parseSignal(signalStr);
+    const conn = connections.get(from);
+    if (conn) conn.addSignal(msg);
+  });
+
+  return () => signaling.close();
 }

@@ -3,15 +3,21 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   createPeerId,
-  joinRoom,
-  leaveRoom,
-  connectToPeers,
+  createWsSignaling,
+  connectToPeersWithSignaling,
   type PeerConnection,
 } from "./call-functions";
 
 const ROOM_ID = "default";
 
+function getDefaultWsUrl(): string {
+  if (typeof window === "undefined") return "ws://localhost:4000";
+  const host = window.location.hostname;
+  return host === "localhost" ? "ws://localhost:4000" : `ws://${host}:4000`;
+}
+
 export default function Home() {
+  const [wsUrl, setWsUrl] = useState("");
   const [inCall, setInCall] = useState(false);
   const [peers, setPeers] = useState<string[]>([]);
   const [remoteStreams, setRemoteStreams] = useState<Map<string, MediaStream>>(
@@ -25,6 +31,7 @@ export default function Home() {
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const connectionsRef = useRef<Map<string, PeerConnection>>(new Map());
   const stopRef = useRef({ stop: false });
+  const cleanupSignalingRef = useRef<(() => void) | null>(null);
 
   const addRemoteStream = useCallback((peerId: string, stream: MediaStream) => {
     setRemoteStreams((prev) => {
@@ -44,6 +51,11 @@ export default function Home() {
 
   const handleJoin = useCallback(async () => {
     setError("");
+    const url = (wsUrl || getDefaultWsUrl()).trim();
+    if (!url.startsWith("ws://") && !url.startsWith("wss://")) {
+      setError("Informe o endereço do servidor (ex: ws://192.168.1.10:4000)");
+      return;
+    }
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: true,
@@ -54,31 +66,45 @@ export default function Home() {
 
       const peerId = createPeerId();
       setMyId(peerId);
-      await joinRoom(ROOM_ID, peerId);
 
+      const signaling = createWsSignaling(url);
+      signaling.onDisconnect(() => setSignalingOnline(false));
+      signaling.onReconnect(() => setSignalingOnline(true));
+
+      await signaling.joinRoom(ROOM_ID, peerId);
       setInCall(true);
       setSignalingOnline(true);
       stopRef.current.stop = false;
       connectionsRef.current = new Map();
 
-      connectToPeers(
+      const cleanup = connectToPeersWithSignaling(
         peerId,
         ROOM_ID,
         stream,
+        signaling,
         connectionsRef.current,
         addRemoteStream,
         removeRemoteStream,
         setPeers,
-        setSignalingOnline,
         stopRef.current
       );
+      cleanupSignalingRef.current = () => {
+        cleanup();
+        signaling.leaveRoom(ROOM_ID, peerId);
+        signaling.close();
+      };
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Erro ao entrar na call.");
+      setError(
+        e instanceof Error ? e.message : "Erro ao entrar. Rode na rede: npm run signaling"
+      );
     }
-  }, [addRemoteStream, removeRemoteStream]);
+  }, [wsUrl, addRemoteStream, removeRemoteStream]);
 
-  const handleLeave = useCallback(async () => {
+  const handleLeave = useCallback(() => {
     stopRef.current.stop = true;
+    cleanupSignalingRef.current?.();
+    cleanupSignalingRef.current = null;
+
     const stream = localStreamRef.current;
     if (stream) {
       stream.getTracks().forEach((t) => t.stop());
@@ -87,16 +113,16 @@ export default function Home() {
     if (localVideoRef.current) localVideoRef.current.srcObject = null;
     connectionsRef.current.forEach((c) => c.close());
     connectionsRef.current.clear();
-    if (myId) await leaveRoom(ROOM_ID, myId);
 
     setPeers([]);
     setRemoteStreams(new Map());
     setInCall(false);
-  }, [myId]);
+  }, []);
 
   useEffect(() => {
     return () => {
       stopRef.current.stop = true;
+      cleanupSignalingRef.current?.();
       localStreamRef.current?.getTracks().forEach((t) => t.stop());
       connectionsRef.current.forEach((c) => c.close());
     };
@@ -107,21 +133,30 @@ export default function Home() {
       <main className="w-full max-w-md flex flex-col items-center gap-6 text-center">
         <h1 className="text-2xl font-semibold">Call (mesma rede)</h1>
         <p className="text-zinc-400 text-sm max-w-xs">
-          Quem estiver na mesma rede entra na mesma call. Se a conexão cair no meio, o áudio continua (P2P).
+          Para conectar e ouvir áudio: alguém na rede roda <code className="bg-zinc-800 px-1 rounded">npm run signaling</code> e todos informam o endereço (ex: ws://192.168.1.10:4000).
         </p>
 
         {!inCall ? (
-          <button
-            onClick={handleJoin}
-            className="px-6 py-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 font-medium transition-colors"
-          >
-            Entrar na call
-          </button>
+          <div className="w-full flex flex-col items-center gap-4">
+            <input
+              type="text"
+              placeholder={getDefaultWsUrl()}
+              value={wsUrl}
+              onChange={(e) => setWsUrl(e.target.value)}
+              className="w-full max-w-sm px-4 py-2.5 rounded-xl bg-zinc-800 border border-zinc-700 focus:outline-none focus:ring-2 focus:ring-emerald-500 text-sm text-center"
+            />
+            <button
+              onClick={handleJoin}
+              className="px-6 py-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 font-medium transition-colors"
+            >
+              Entrar na call
+            </button>
+          </div>
         ) : (
           <div className="w-full flex flex-col items-center gap-4">
             {!signalingOnline && (
               <p className="text-amber-400 text-sm">
-                Sem conexão com o servidor — chamada ativa (P2P)
+                Servidor desconectado — chamada ativa (P2P)
               </p>
             )}
             <p className="text-xs text-zinc-500 truncate max-w-full" title={myId}>
@@ -138,7 +173,7 @@ export default function Home() {
             </div>
             <p className="text-sm text-zinc-400">
               {peers.length <= 1
-                ? "Aguardando outras pessoas na sala..."
+                ? "Aguardando outras pessoas..."
                 : `${peers.length} pessoa(s) na sala`}
             </p>
             <div className="w-full grid grid-cols-2 gap-2">
@@ -155,7 +190,7 @@ export default function Home() {
           </div>
         )}
 
-        {error && <p className="text-red-400 text-sm">{error}</p>}
+        {error && <p className="text-red-400 text-sm max-w-xs">{error}</p>}
       </main>
     </div>
   );
