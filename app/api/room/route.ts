@@ -1,10 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
-
-const rooms = new Map<string, Set<string>>();
+import { roomGetPeers, roomAdd, roomRemove } from "@/lib/store";
 
 export async function GET(request: NextRequest) {
   const roomId = request.nextUrl.searchParams.get("roomId") ?? "";
-  const peers = roomId ? Array.from(rooms.get(roomId) ?? []) : [];
+  const peers = roomId ? await roomGetPeers(roomId) : [];
   return NextResponse.json(peers);
 }
 
@@ -16,14 +15,10 @@ export async function POST(request: NextRequest) {
       { status: 400 }
     );
   }
-  if (!rooms.has(roomId)) rooms.set(roomId, new Set());
-  const room = rooms.get(roomId)!;
   if (action === "leave") {
-    room.delete(peerId);
-    if (room.size === 0) rooms.delete(roomId);
+    await roomRemove(roomId, peerId);
     return NextResponse.json({ ok: true });
   }
-  room.add(peerId);
-  const peers = Array.from(room).filter((id) => id !== peerId);
+  const peers = await roomAdd(roomId, peerId);
   return NextResponse.json(peers);
 }
