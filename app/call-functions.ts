@@ -91,12 +91,30 @@ export function createPeerConnection(
     iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
   });
   localStream.getTracks().forEach((track) => pc.addTrack(track, localStream));
+
+  const iceQueue: RTCIceCandidateInit[] = [];
+  const applyIceQueue = async () => {
+    while (iceQueue.length > 0) {
+      const c = iceQueue.shift()!;
+      try {
+        await pc.addIceCandidate(new RTCIceCandidate(c));
+      } catch (_) {}
+    }
+  };
+
   pc.ontrack = (e) => {
     if (e.streams[0]) onRemoteStream(otherId, e.streams[0]);
   };
   pc.oniceconnectionstatechange = () => {
-    if (pc.iceConnectionState === "disconnected" || pc.iceConnectionState === "failed")
+    const state = pc.iceConnectionState;
+    if (state === "disconnected" || state === "failed" || state === "closed") {
       onClose(otherId);
+    }
+  };
+  pc.onconnectionstatechange = () => {
+    if (pc.connectionState === "failed" || pc.connectionState === "closed") {
+      onClose(otherId);
+    }
   };
   pc.onicecandidate = (e) => {
     if (e.candidate)
@@ -107,14 +125,20 @@ export function createPeerConnection(
     try {
       if (msg.type === "offer") {
         await pc.setRemoteDescription(new RTCSessionDescription({ type: "offer", sdp: msg.sdp }));
+        await applyIceQueue();
         const answer = await pc.createAnswer();
         await pc.setLocalDescription(answer);
         await sendSignal(myId, otherId, { type: "answer", sdp: answer.sdp! });
       } else if (msg.type === "answer") {
         await pc.setRemoteDescription(new RTCSessionDescription({ type: "answer", sdp: msg.sdp }));
+        await applyIceQueue();
       } else if (msg.type === "candidate") {
         const c = typeof msg.candidate === "string" ? JSON.parse(msg.candidate) : msg.candidate;
-        await pc.addIceCandidate(new RTCIceCandidate(c));
+        if (pc.remoteDescription) {
+          await pc.addIceCandidate(new RTCIceCandidate(c));
+        } else {
+          iceQueue.push(c);
+        }
       }
     } catch (err) {
       console.error("Signal error:", err);

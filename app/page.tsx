@@ -103,37 +103,37 @@ export default function Home() {
   }, []);
 
   return (
-    <div className="min-h-screen bg-zinc-950 text-zinc-100 p-6 font-sans">
-      <main className="max-w-xl mx-auto flex flex-col gap-6">
+    <div className="min-h-screen bg-zinc-950 text-zinc-100 flex items-center justify-center p-4 font-sans">
+      <main className="w-full max-w-md flex flex-col items-center gap-6 text-center">
         <h1 className="text-2xl font-semibold">Call (mesma rede)</h1>
-        <p className="text-zinc-400 text-sm">
+        <p className="text-zinc-400 text-sm max-w-xs">
           Quem estiver na mesma rede entra na mesma call. Se a conexão cair no meio, o áudio continua (P2P).
         </p>
 
         {!inCall ? (
           <button
             onClick={handleJoin}
-            className="px-4 py-3 rounded-lg bg-emerald-600 hover:bg-emerald-500 font-medium w-fit"
+            className="px-6 py-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 font-medium transition-colors"
           >
             Entrar na call
           </button>
         ) : (
-          <div className="flex flex-col gap-4">
+          <div className="w-full flex flex-col items-center gap-4">
             {!signalingOnline && (
               <p className="text-amber-400 text-sm">
                 Sem conexão com o servidor — chamada ativa (P2P)
               </p>
             )}
-            <div className="flex items-center gap-2 text-sm text-zinc-400">
-              <span>Você: {myId}</span>
-            </div>
-            <div className="rounded-lg overflow-hidden bg-zinc-900 border border-zinc-700 aspect-video flex items-center justify-center min-h-[200px]">
+            <p className="text-xs text-zinc-500 truncate max-w-full" title={myId}>
+              Você: {myId}
+            </p>
+            <div className="rounded-xl overflow-hidden bg-zinc-900 border border-zinc-700 w-full aspect-video max-h-32 flex items-center justify-center">
               <video
                 ref={localVideoRef}
                 autoPlay
                 muted
                 playsInline
-                className="max-h-32 rounded object-cover"
+                className="w-full h-full object-cover"
               />
             </div>
             <p className="text-sm text-zinc-400">
@@ -141,14 +141,14 @@ export default function Home() {
                 ? "Aguardando outras pessoas na sala..."
                 : `${peers.length} pessoa(s) na sala`}
             </p>
-            <div className="grid grid-cols-2 gap-2">
+            <div className="w-full grid grid-cols-2 gap-2">
               {Array.from(remoteStreams.entries()).map(([peerId, stream]) => (
                 <RemoteVideo key={peerId} peerId={peerId} stream={stream} />
               ))}
             </div>
             <button
               onClick={handleLeave}
-              className="px-4 py-3 rounded-lg bg-red-600 hover:bg-red-500 font-medium"
+              className="px-6 py-3 rounded-xl bg-red-600 hover:bg-red-500 font-medium transition-colors w-full max-w-xs"
             >
               Sair da call
             </button>
@@ -170,17 +170,26 @@ function RemoteVideo({
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   useEffect(() => {
-    if (videoRef.current) videoRef.current.srcObject = stream;
+    const el = videoRef.current;
+    if (!el) return;
+    el.srcObject = stream;
+    el.play().catch(() => {});
   }, [stream]);
+  useEffect(() => {
+    return () => {
+      const el = videoRef.current;
+      if (el) el.srcObject = null;
+    };
+  }, []);
   return (
-    <div className="rounded-lg overflow-hidden bg-zinc-800 border border-zinc-700">
+    <div className="rounded-xl overflow-hidden bg-zinc-800 border border-zinc-700">
       <video
         ref={videoRef}
         autoPlay
         playsInline
         className="w-full aspect-video object-cover"
       />
-      <p className="text-xs text-zinc-500 p-1 truncate">{peerId}</p>
+      <p className="text-xs text-zinc-500 p-1.5 truncate">{peerId}</p>
     </div>
   );
 }
