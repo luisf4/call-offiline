@@ -17,6 +17,7 @@ export default function Home() {
   const [remoteStreams, setRemoteStreams] = useState<Map<string, MediaStream>>(
     new Map()
   );
+  const [signalingOnline, setSignalingOnline] = useState(true);
   const [error, setError] = useState("");
   const [myId, setMyId] = useState("");
 
@@ -54,7 +55,9 @@ export default function Home() {
       const peerId = createPeerId();
       setMyId(peerId);
       await joinRoom(ROOM_ID, peerId);
+
       setInCall(true);
+      setSignalingOnline(true);
       stopRef.current.stop = false;
       connectionsRef.current = new Map();
 
@@ -66,10 +69,11 @@ export default function Home() {
         addRemoteStream,
         removeRemoteStream,
         setPeers,
+        setSignalingOnline,
         stopRef.current
       );
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Erro ao entrar na call");
+      setError(e instanceof Error ? e.message : "Erro ao entrar na call.");
     }
   }, [addRemoteStream, removeRemoteStream]);
 
@@ -83,9 +87,8 @@ export default function Home() {
     if (localVideoRef.current) localVideoRef.current.srcObject = null;
     connectionsRef.current.forEach((c) => c.close());
     connectionsRef.current.clear();
-    if (myId) {
-      await leaveRoom(ROOM_ID, myId);
-    }
+    if (myId) await leaveRoom(ROOM_ID, myId);
+
     setPeers([]);
     setRemoteStreams(new Map());
     setInCall(false);
@@ -102,9 +105,9 @@ export default function Home() {
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-100 p-6 font-sans">
       <main className="max-w-xl mx-auto flex flex-col gap-6">
-        <h1 className="text-2xl font-semibold">Call offline (mesma rede)</h1>
+        <h1 className="text-2xl font-semibold">Call (mesma rede)</h1>
         <p className="text-zinc-400 text-sm">
-          Quem estiver na mesma rede WiFi entra na mesma call.
+          Quem estiver na mesma rede entra na mesma call. Se a conexão cair no meio, o áudio continua (P2P).
         </p>
 
         {!inCall ? (
@@ -116,6 +119,11 @@ export default function Home() {
           </button>
         ) : (
           <div className="flex flex-col gap-4">
+            {!signalingOnline && (
+              <p className="text-amber-400 text-sm">
+                Sem conexão com o servidor — chamada ativa (P2P)
+              </p>
+            )}
             <div className="flex items-center gap-2 text-sm text-zinc-400">
               <span>Você: {myId}</span>
             </div>
@@ -129,7 +137,7 @@ export default function Home() {
               />
             </div>
             <p className="text-sm text-zinc-400">
-              {peers.length === 0
+              {peers.length <= 1
                 ? "Aguardando outras pessoas na sala..."
                 : `${peers.length} pessoa(s) na sala`}
             </p>
@@ -147,9 +155,7 @@ export default function Home() {
           </div>
         )}
 
-        {error && (
-          <p className="text-red-400 text-sm">{error}</p>
-        )}
+        {error && <p className="text-red-400 text-sm">{error}</p>}
       </main>
     </div>
   );

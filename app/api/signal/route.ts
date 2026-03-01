@@ -1,9 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
-import { signalPush, signalPopAll } from "@/lib/store";
+
+const signals = new Map<string, Array<{ from: string; signal: string }>>();
 
 export async function GET(request: NextRequest) {
   const peerId = request.nextUrl.searchParams.get("peerId") ?? "";
-  const list = await signalPopAll(peerId);
+  const list = signals.get(peerId) ?? [];
+  signals.set(peerId, []);
   return NextResponse.json(list);
 }
 
@@ -15,6 +17,7 @@ export async function POST(request: NextRequest) {
       { status: 400 }
     );
   }
-  await signalPush(to, from, signal);
+  if (!signals.has(to)) signals.set(to, []);
+  signals.get(to)!.push({ from, signal });
   return NextResponse.json({ ok: true });
 }
